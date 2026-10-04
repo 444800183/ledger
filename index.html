@@ -148,12 +148,13 @@ html,body{overscroll-behavior:none;touch-action:manipulation}
 .custHead .nm{font-size:17px;font-weight:700}
 .custHead .sub{font-size:11.5px;color:var(--ink3);background:#f2f4f7;padding:3px 9px;border-radius:999px;font-weight:600}
 .custSum{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
-.custSum .box{background:#f7f9f8;border:1px solid var(--line);border-radius:11px;padding:9px 6px;text-align:center}
+.custSum .box{background:#f7f9f8;border:1px solid var(--line);border-radius:11px;padding:9px 6px;text-align:center;min-height:62px;display:flex;flex-direction:column;justify-content:center}
 .custSum .box .k{font-size:10.5px;color:var(--ink3)}
 .custSum .box .v{font-size:14px;font-weight:750;font-variant-numeric:tabular-nums;margin-top:3px}
 .custSum .box.paid{background:#e6f2ef;border-color:#b8ddd3}
 .custSum .box.paid .k{color:#0b6b5a;font-weight:650}
 .custSum .box.paid .v{color:#0b6b5a}
+.custSum .box.paid input{width:100%;border:none;background:transparent;text-align:center;font-size:14px;font-weight:750;color:#0b6b5a;outline:none;font-variant-numeric:tabular-nums;padding:0;margin-top:3px}
 .custSum .box.unpaid .v{color:#b3261e}
 .settleRow{display:flex;flex-direction:column;gap:7px;padding:11px 0;border-bottom:1px solid var(--line2)}
 .settleRow:last-child{border-bottom:none}
@@ -234,7 +235,6 @@ function weekday(ds){ return '周'+'日一二三四五六'.charAt(new Date(ds+'T
 function prettyDate(ds){ var t=today(); if(ds===t) return '今天'; if(ds===addDays(t,-1)) return '昨天'; return ds.slice(5).replace('-','/')+' '+weekday(ds); }
 function toast(msg){ var t=q('#toast'); t.textContent=msg; t.classList.add('on'); clearTimeout(toast._t); toast._t=setTimeout(function(){ t.classList.remove('on'); },2000); }
 function L(){ return state.settings; }
-function download(name,text,mime){ showBackupText(text); }
 function showBackupText(text){
   var box=el('div','stack');
   box.appendChild(el('p','small muted','点下面按钮复制全部，然后粘贴到备忘录、微信文件传输助手或发给另一台手机。'));
@@ -301,12 +301,34 @@ function getPaid(r){ return num(r.paidAmount || 0); }
 function getUnpaid(r){ var u = getFinalAmount(r) - getPaid(r); return u < 0 ? 0 : u; }
 function getLoss(r){ if(r.unloadQty == null) return 0; return num(r.qty) - num(r.unloadQty); }
 function sumUnpaid(rs){ var s=0; rs.forEach(function(r){ s+=getUnpaid(r); }); return s; }
+function sumPaid(rs){ var s=0; rs.forEach(function(r){ s+=getPaid(r); }); return s; }
 function isSettled(r){ return (r.unloadQty != null || r.settlePrice != null || r.finalAmount != null || r.costPrice != null || (r.paidAmount != null && num(r.paidAmount) > 0)); }
 function payStatus(r){
   var total = getFinalAmount(r), paid = getPaid(r);
   if(paid <= 0 && total > 0) return 'wait';
   if(paid >= total && total > 0) return 'done';
   return 'part';
+}
+/* 把总额自动分摊到各车：从最早的开始填满 */
+function distributePaid(recs, totalPaid){
+  var remaining = num(totalPaid);
+  var sorted = recs.slice().sort(function(a,b){ return (a.date<b.date?-1:(a.date>b.date?1:num(a.ts)-num(b.ts))); });
+  sorted.forEach(function(r){ r.paidAmount = 0; r.paid = false; });
+  for(var i=0;i<sorted.length;i++){
+    if(remaining <= 0.001) break;
+    var r = sorted[i];
+    var due = getFinalAmount(r);
+    if(due <= 0) continue;
+    if(remaining >= due){
+      r.paidAmount = due;
+      r.paid = true;
+      remaining = Math.round((remaining - due)*100)/100;
+    } else {
+      r.paidAmount = Math.round(remaining*100)/100;
+      r.paid = false;
+      remaining = 0;
+    }
+  }
 }
 function openSheet(title,node,onClose){
   var sheet=q('#sheet'); sheet.textContent=''; var h=el('h3'); add(h,el('span',null,title));
@@ -347,7 +369,7 @@ function go(id){
 function refreshAll(){ updateHeader(); if(curTab==='entry') renderEntry(); if(curTab==='settle') renderSettle(); if(curTab==='detail') renderDetail(); if(curTab==='bill') renderBill(); if(curTab==='stats') renderStats(); if(curTab==='settings') renderSettings(); }
 function updateHeader(){ var s=L(); q('#shopTitle').textContent=s.shopName||'销售流水'; q('#shopSub').textContent=(s.phone?(s.phone+' · '):'')+'开单 · 结算 · 对账'; }
 
-/* 开单页 */
+/* ========= 开单页 ========= */
 var curDate=today();
 var inputState={customer:'',plate:'',qty:'',price:'',paid:false};
 function inputAttrs(kind,inp){
@@ -543,7 +565,7 @@ function updateEntrySummary(){
   if(ua>0){ if(!warn){ warn=el('div','warn'); warn.appendChild(el('span','ic','⚠')); warn.appendChild(el('span')); c2s[1].appendChild(warn); } var t=warn.querySelector('span:last-child'); if(t) t.innerHTML='今日有 <b>'+fmtMoney(ua)+'</b> '+L().money+' 未收回（'+countUnpaid(recs)+' 笔）'; } else if(warn){ warn.parentNode.removeChild(warn); }
 }
 
-/* 结算页 */
+/* ========= 结算页（按客户，已收可填总额自动分摊） ========= */
 var settleFilter='all';
 function renderSettle(){
   var v=q('#view-settle'); v.textContent='';
@@ -565,7 +587,20 @@ function renderSettle(){
     c.appendChild(head);
     var sumBox=el('div','custSum');
     var b1=el('div','box'); b1.appendChild(el('div','k','应收')); b1.appendChild(el('div','v',fmtMoney(sumFinal))); sumBox.appendChild(b1);
-    var b2=el('div','box paid'); b2.appendChild(el('div','k','已收')); b2.appendChild(el('div','v',fmtMoney(sumPaid))); sumBox.appendChild(b2);
+    var b2=el('div','box paid');
+    b2.appendChild(el('div','k','已收（可填总额）'));
+    var totalPaidIn=el('input');
+    totalPaidIn.type='number'; totalPaidIn.step='0.01'; totalPaidIn.inputMode='decimal';
+    totalPaidIn.value = sumPaid>0 ? String(Math.round(sumPaid*100)/100) : '';
+    totalPaidIn.placeholder='0';
+    totalPaidIn.addEventListener('change',function(){
+      var tp = totalPaidIn.value==='' ? 0 : num(totalPaidIn.value);
+      distributePaid(rs, tp);
+      save(); renderSettle();
+      toast('已分摊到各车');
+    });
+    b2.appendChild(totalPaidIn);
+    sumBox.appendChild(b2);
     var b3=el('div','box unpaid'); b3.appendChild(el('div','k','未收')); b3.appendChild(el('div','v',fmtMoney(sumUnpaid))); sumBox.appendChild(b3);
     c.appendChild(sumBox);
     var profitBar=el('div','bigtotal'); profitBar.style.padding='8px 12px';
@@ -612,7 +647,7 @@ function renderSettle(){
   });
 }
 
-/* 明细页 */
+/* ========= 明细页（可点击编辑） ========= */
 var detailView='customer';
 function renderDetail(){
   var v=q('#view-detail'); v.textContent='';
@@ -722,7 +757,7 @@ function openEditSheet(r, onSaved){
   openSheet('修改记录', box);
 }
 
-/* 对账页 */
+/* ========= 对账页 ========= */
 var billCust=''; var billFrom=''; var billTo='';
 function renderBill(){
   var v=q('#view-bill'); v.textContent='';
@@ -978,7 +1013,7 @@ function saveBillImage(opts){
   }catch(err){ toast('生成失败：'+err.message); console.error(err); }
 }
 
-/* 统计页 */
+/* ========= 统计页 ========= */
 var statRange='month';
 function rangeOf(key){
   var t=today();
@@ -1034,7 +1069,7 @@ function renderStats(){
   c3.appendChild(rk); v.appendChild(c3);
 }
 
-/* 设置页 */
+/* ========= 设置页 ========= */
 function renderSettings(){
   var v=q('#view-settings'); v.textContent=''; var s=L();
   var c1=el('div','card'); c1.appendChild(el('h3',null,'店铺信息'));
@@ -1156,7 +1191,7 @@ function renderSettings(){
   c4.appendChild(p); v.appendChild(c4);
 }
 
-/* 云同步 */
+/* ========= 云同步 ========= */
 var CLOUD_KEY='xs_cloud_v1';
 function loadCloud(){ try{ return JSON.parse(localStorage.getItem(CLOUD_KEY)||'{}'); }catch(e){ return {}; } }
 function saveCloudCfg(user,pass,file,proxy){ var c=loadCloud(); c.user=(user||'').trim(); c.pass=(pass||'').trim(); c.file=(file||'').trim()||'账本.json'; c.proxy=(proxy||'').trim(); try{ localStorage.setItem(CLOUD_KEY,JSON.stringify(c)); }catch(e){} }
